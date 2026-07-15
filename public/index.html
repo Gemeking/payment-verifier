@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Payment Verifier — CBE &amp; telebirr</title>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f2f4f8; color: #1c2733; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
@@ -58,8 +59,9 @@
       <button class="ghost" id="btnCam">📸 Camera</button>
       <button class="ghost" id="btnFile">🖼️ Upload</button>
     </div>
+    <input type="text" id="txid" placeholder="Optional: type the transaction ID (FT… or telebirr no.)" maxlength="20">
     <input type="text" id="account" placeholder="Optional: CBE account — last 8 digits" maxlength="16">
-    <div class="note">Only needed for CBE receipts whose QR holds just the transaction ID.</div>
+    <div class="note">CBE receipts need the account digits; you can even verify with no image if you type the transaction ID.</div>
     <img id="preview" alt="receipt preview">
     <div class="btns">
       <button class="primary" id="btnVerify" disabled>Verify payment</button>
@@ -164,22 +166,42 @@
   const LABELS = { amount: 'Amount (ETB)', totalDebited: 'Total debited (incl. fees)', date: 'Time sent', payer: 'From (payer)', receiver: 'To (receiver)', txId: 'Transaction ID', status: 'Status' };
   const VERDICT_TEXT = { VERIFIED: '✅ VERIFIED', NEED_ACCOUNT: '🔢 ACCOUNT DIGITS NEEDED', FAILED: '❌ NOT VERIFIED' };
 
+  let ocrWorkerPromise = null;
+  function getOcrWorker() {
+    if (!ocrWorkerPromise) ocrWorkerPromise = Tesseract.createWorker('eng');
+    return ocrWorkerPromise;
+  }
+
   btnVerify.onclick = async () => {
-    if (!currentFile) return;
+    const manualId = document.getElementById('txid').value.trim();
+    if (!currentFile && !manualId) return;
     btnVerify.disabled = true;
     progress.style.display = 'block';
     document.getElementById('result').style.display = 'none';
     try {
-      progressText.textContent = 'Reading QR code…';
-      const img = await loadBitmap(currentFile);
-      let qr = null;
-      try { qr = decodeQrFromImage(img); } catch (e) {}
+      let qr = null, ocrText = '';
+      if (currentFile) {
+        progressText.textContent = 'Reading QR code…';
+        const img = await loadBitmap(currentFile);
+        try { qr = decodeQrFromImage(img); } catch (e) {}
+
+        // QR unreadable — read the transaction ID off the receipt instead
+        // (the result still comes only from the bank server)
+        if (!qr && !manualId) {
+          progressText.textContent = 'No QR found — reading the transaction ID from the receipt…';
+          try {
+            const worker = await getOcrWorker();
+            const { data } = await worker.recognize(drawToCanvas(img, 1600));
+            ocrText = data.text || '';
+          } catch (e) {}
+        }
+      }
 
       progressText.textContent = 'Checking with the official bank servers…';
       const res = await fetch('/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr, account: document.getElementById('account').value }),
+        body: JSON.stringify({ qr, ocrText, txId: manualId, account: document.getElementById('account').value }),
       });
       showResult(await res.json());
     } catch (e) {
@@ -189,6 +211,9 @@
       btnVerify.disabled = false;
     }
   };
+  document.getElementById('txid').addEventListener('input', (e) => {
+    if (e.target.value.trim() || currentFile) btnVerify.disabled = false;
+  });
 
   function showResult(d) {
     const r = document.getElementById('result');

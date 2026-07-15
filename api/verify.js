@@ -128,7 +128,7 @@ async function verifyTelebirr(txId) {
   const res = await fetchUrl(url);
   if (res.status !== 200) throw new Error('telebirr server answered HTTP ' + res.status);
   const t = htmlToText(res.body.toString('utf8'));
-  if (!/telebirr/i.test(t)) throw new Error('unexpected reply from the telebirr server');
+  if (!/telebirr/i.test(t)) throw new Error('telebirr has no record of transaction ' + txId);
 
   const fields = { provider: 'telebirr', txId };
   let m;
@@ -146,6 +146,25 @@ async function verifyTelebirr(txId) {
   return fields;
 }
 
+// Pull possible transaction IDs out of OCR text — used only to LOOK UP the
+// bank record; the displayed result always comes from the bank server
+function txCandidatesFromText(text) {
+  const t = String(text || '').toUpperCase();
+  const out = [];
+  const push = (v) => { if (v && !out.includes(v)) out.push(v); };
+  let m;
+  const ftRe = /\bFT[A-Z0-9]{8,12}\b/g;
+  while ((m = ftRe.exec(t))) push(m[0]);
+  const nearRe = /TRANSACTION\s*(?:NUMBER|NO\.?|ID)\s*:?\s*([A-Z0-9]{10})\b/g;
+  while ((m = nearRe.exec(t))) { push(m[1]); push(m[1].replace(/O/g, '0')); }
+  const tenRe = /\b([A-Z0-9]{10})\b/g;
+  while ((m = tenRe.exec(t))) {
+    const v = m[1];
+    if (/[A-Z]/.test(v) && /\d/.test(v) && !/^FT/.test(v)) { push(v); push(v.replace(/O/g, '0')); }
+  }
+  return out.slice(0, 8);
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.statusCode = 405;
@@ -161,20 +180,13 @@ module.exports = async (req, res) => {
     if (typeof body === 'string') body = JSON.parse(body || '{}');
     if (!body) body = {};
     const qr = (body.qr || '').trim() || null;
+    const manualId = (body.txId || '').trim().toUpperCase() || null;
+    const ocrText = body.ocrText || '';
     const accountSuffix = (body.account || '').replace(/\D/g, '');
-
-    if (!qr) {
-      return send({
-        verdict: 'FAILED',
-        confidence: 'No QR code could be read from this image — use the original receipt screenshot (the QR must be sharp and complete)',
-        fields: {},
-        steps: ['no QR code provided'],
-      });
-    }
-    steps.push('QR code content: ' + qr.slice(0, 70));
 
     let fields = null, failReason = null, needAccount = false;
     const attempt = async (label, fn) => {
+      if (fields) return;
       try {
         fields = await fn();
         steps.push('CONFIRMED with the official ' + label + ' server ✔');
@@ -183,33 +195,61 @@ module.exports = async (req, res) => {
         steps.push(label + ' check failed: ' + e.message);
       }
     };
-
-    const telebirrTx = telebirrTxFromQr(qr);
-
-    if (/mbreciept\.cbe\.com\.et\//i.test(qr)) {
-      const token = qr.split('cbe.com.et/')[1].split(/[?#]/)[0];
-      await attempt('CBE', () => verifyCbeApi(token));
-    } else if (/apps\.cbe\.com\.et/i.test(qr)) {
-      const idMatch = qr.match(/id=([A-Z0-9]+)/i);
-      if (idMatch) await attempt('CBE', () => verifyCbeLegacy(idMatch[1], ''));
-      else failReason = 'unrecognized CBE link in the QR code';
-    } else if (/ethiotelecom\.et/i.test(qr)) {
-      const idMatch = qr.match(/receipt\/([A-Z0-9]+)/i);
-      if (idMatch) await attempt('telebirr', () => verifyTelebirr(idMatch[1]));
-      else failReason = 'unrecognized telebirr link in the QR code';
-    } else if (/^FT[A-Z0-9]{6,}$/i.test(qr)) {
+    let pendingCbeId = null;
+    const tryCbeId = async (id) => {
       if (accountSuffix.length >= 5) {
-        await attempt('CBE', () => verifyCbeLegacy(qr.toUpperCase(), accountSuffix));
+        await attempt('CBE', () => verifyCbeLegacy(id, accountSuffix));
       } else {
         needAccount = true;
-        failReason = 'this CBE QR holds transaction ' + qr.toUpperCase() + ' — CBE needs the last 8 digits of the account to release the record';
-        steps.push('waiting for account digits to query CBE');
+        pendingCbeId = id;
+        failReason = 'found CBE transaction ' + id + ' — CBE needs the last 8 digits of the account to release the record';
+        steps.push('waiting for account digits to query CBE about ' + id);
       }
-    } else if (telebirrTx) {
-      steps.push('telebirr transaction number decoded from QR: ' + telebirrTx);
-      await attempt('telebirr', () => verifyTelebirr(telebirrTx));
+    };
+
+    // 1. QR code — the most reliable route
+    if (qr) {
+      steps.push('QR code content: ' + qr.slice(0, 70));
+      const telebirrTx = telebirrTxFromQr(qr);
+      if (/mbreciept\.cbe\.com\.et\//i.test(qr)) {
+        const token = qr.split('cbe.com.et/')[1].split(/[?#]/)[0];
+        await attempt('CBE', () => verifyCbeApi(token));
+      } else if (/apps\.cbe\.com\.et/i.test(qr)) {
+        const idMatch = qr.match(/id=([A-Z0-9]+)/i);
+        if (idMatch) await attempt('CBE', () => verifyCbeLegacy(idMatch[1], ''));
+      } else if (/ethiotelecom\.et/i.test(qr)) {
+        const idMatch = qr.match(/receipt\/([A-Z0-9]+)/i);
+        if (idMatch) await attempt('telebirr', () => verifyTelebirr(idMatch[1]));
+      } else if (/^FT[A-Z0-9]{6,}$/i.test(qr)) {
+        await tryCbeId(qr.toUpperCase());
+      } else if (telebirrTx) {
+        steps.push('telebirr transaction number decoded from QR: ' + telebirrTx);
+        await attempt('telebirr', () => verifyTelebirr(telebirrTx));
+      } else {
+        steps.push('QR is not a CBE/telebirr receipt QR — falling back to transaction ID search');
+      }
     } else {
-      failReason = 'this QR code is not a CBE or telebirr receipt QR';
+      steps.push('no QR code readable — falling back to transaction ID search');
+    }
+
+    // 2. Manually typed transaction ID
+    if (!fields && manualId) {
+      if (/^FT[A-Z0-9]{6,}$/.test(manualId)) await tryCbeId(manualId);
+      else if (/^[A-Z0-9]{10}$/.test(manualId)) await attempt('telebirr', () => verifyTelebirr(manualId));
+      else { failReason = manualId + ' does not look like a CBE (FT…) or telebirr (10 characters) transaction ID'; }
+    }
+
+    // 3. Transaction IDs found in the receipt text (OCR) — each candidate is
+    //    checked against the bank server, so a wrong OCR read can never
+    //    produce a false VERIFIED
+    if (!fields && ocrText) {
+      const candidates = txCandidatesFromText(ocrText);
+      if (candidates.length) steps.push('possible transaction IDs read from the image: ' + candidates.join(', '));
+      for (const c of candidates) {
+        if (fields) break;
+        if (/^FT/.test(c)) await tryCbeId(c);
+        else await attempt('telebirr', () => verifyTelebirr(c));
+      }
     }
 
     if (fields) {
@@ -232,11 +272,11 @@ module.exports = async (req, res) => {
 
     return send({
       verdict: needAccount ? 'NEED_ACCOUNT' : 'FAILED',
-      confidence: failReason || 'verification failed',
+      confidence: failReason || 'Could not find a QR code or a transaction ID in this image — type the transaction ID manually and try again',
       hint: needAccount
         ? 'Enter the last 8 digits of the account (yours or the sender’s) above and press Verify again.'
         : null,
-      fields: { txId: needAccount ? qr.toUpperCase() : null },
+      fields: { txId: pendingCbeId },
       steps,
     });
   } catch (e) {
