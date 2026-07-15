@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Payment Verifier — CBE &amp; telebirr</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f2f4f8; color: #1c2733; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
+  h1 { font-size: 1.35rem; margin-bottom: 4px; }
+  .sub { color: #64748b; font-size: .9rem; margin-bottom: 20px; text-align: center; }
+  .card { background: #fff; border-radius: 14px; box-shadow: 0 2px 10px rgba(15,30,60,.08); padding: 20px; width: 100%; max-width: 460px; margin-bottom: 16px; }
+  .drop { border: 2px dashed #b6c2d4; border-radius: 12px; padding: 28px 12px; text-align: center; cursor: pointer; transition: .15s; }
+  .drop:hover, .drop.over { border-color: #2563eb; background: #eff4ff; }
+  .drop p { color: #475569; font-size: .95rem; }
+  .drop .big { font-size: 2rem; margin-bottom: 6px; }
+  .btns { display: flex; gap: 10px; margin-top: 14px; }
+  button, .btn { flex: 1; border: 0; border-radius: 10px; padding: 12px; font-size: 1rem; font-weight: 600; cursor: pointer; }
+  .primary { background: #2563eb; color: #fff; }
+  .primary:disabled { background: #94a3b8; cursor: default; }
+  .ghost { background: #eef2f7; color: #1c2733; }
+  input[type=text] { width: 100%; margin-top: 12px; padding: 11px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: .95rem; }
+  .note { font-size: .78rem; color: #94a3b8; margin-top: 6px; }
+  #preview { max-width: 100%; max-height: 260px; border-radius: 10px; margin-top: 12px; display: none; }
+  .spinner { display: none; margin: 14px auto 0; width: 34px; height: 34px; border: 4px solid #dbe4f0; border-top-color: #2563eb; border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  #result { display: none; }
+  .verdict { font-size: 1.25rem; font-weight: 800; padding: 14px; border-radius: 10px; text-align: center; margin-bottom: 6px; }
+  .v-VERIFIED { background: #dcfce7; color: #166534; }
+  .v-UNVERIFIED { background: #fef9c3; color: #854d0e; }
+  .v-TAMPERED, .v-FAILED { background: #fee2e2; color: #991b1b; }
+  .conf { text-align: center; color: #475569; font-size: .88rem; margin-bottom: 14px; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 9px 4px; border-bottom: 1px solid #eef2f7; font-size: .95rem; }
+  td:first-child { color: #64748b; width: 42%; }
+  td:last-child { font-weight: 600; text-align: right; word-break: break-all; }
+  .amount-row td:last-child { color: #166534; font-size: 1.15rem; }
+  .mismatch { background: #fee2e2; color: #991b1b; border-radius: 8px; padding: 10px; font-size: .88rem; margin-top: 10px; }
+  .hint { background: #eff4ff; color: #1d4ed8; border-radius: 8px; padding: 10px; font-size: .88rem; margin-top: 10px; }
+  details { margin-top: 12px; }
+  summary { color: #94a3b8; font-size: .82rem; cursor: pointer; }
+  details li { font-size: .8rem; color: #64748b; margin: 4px 0 0 18px; }
+</style>
+</head>
+<body>
+  <h1>💳 Payment Verifier</h1>
+  <div class="sub">CBE &amp; telebirr receipts — scan or upload a screenshot</div>
+
+  <div class="card">
+    <div class="drop" id="drop">
+      <div class="big">📷</div>
+      <p><b>Tap to scan / upload a receipt</b><br>or drag &amp; drop the screenshot here</p>
+    </div>
+    <input type="file" id="file" accept="image/*" hidden>
+    <input type="file" id="cam" accept="image/*" capture="environment" hidden>
+    <div class="btns">
+      <button class="ghost" id="btnCam">📸 Camera</button>
+      <button class="ghost" id="btnFile">🖼️ Upload</button>
+    </div>
+    <input type="text" id="account" placeholder="Optional: receiver CBE account — last 8 digits" maxlength="16">
+    <div class="note">Only needed for CBE receipts when the QR code can’t be read.</div>
+    <img id="preview" alt="receipt preview">
+    <div class="btns">
+      <button class="primary" id="btnVerify" disabled>Verify payment</button>
+    </div>
+    <div class="spinner" id="spin"></div>
+  </div>
+
+  <div class="card" id="result">
+    <div class="verdict" id="verdict"></div>
+    <div class="conf" id="conf"></div>
+    <table id="fields"></table>
+    <div class="mismatch" id="mismatch" style="display:none"></div>
+    <div class="hint" id="hint" style="display:none"></div>
+    <details><summary>What I did</summary><ul id="steps"></ul></details>
+  </div>
+
+<script>
+  const drop = document.getElementById('drop');
+  const fileInput = document.getElementById('file');
+  const camInput = document.getElementById('cam');
+  const preview = document.getElementById('preview');
+  const btnVerify = document.getElementById('btnVerify');
+  const spin = document.getElementById('spin');
+  let currentFile = null;
+
+  function setFile(f) {
+    if (!f) return;
+    currentFile = f;
+    preview.src = URL.createObjectURL(f);
+    preview.style.display = 'block';
+    btnVerify.disabled = false;
+    document.getElementById('result').style.display = 'none';
+  }
+
+  drop.onclick = () => fileInput.click();
+  document.getElementById('btnFile').onclick = () => fileInput.click();
+  document.getElementById('btnCam').onclick = () => camInput.click();
+  fileInput.onchange = () => setFile(fileInput.files[0]);
+  camInput.onchange = () => setFile(camInput.files[0]);
+  drop.ondragover = (e) => { e.preventDefault(); drop.classList.add('over'); };
+  drop.ondragleave = () => drop.classList.remove('over');
+  drop.ondrop = (e) => { e.preventDefault(); drop.classList.remove('over'); setFile(e.dataTransfer.files[0]); };
+
+  const LABELS = { amount: 'Amount (ETB)', totalDebited: 'Total debited (incl. fees)', date: 'Time sent', payer: 'From (payer)', receiver: 'To (receiver)', txId: 'Transaction ID', status: 'Status' };
+  const VERDICT_TEXT = { VERIFIED: '✅ VERIFIED', UNVERIFIED: '⚠️ UNVERIFIED', TAMPERED: '❌ DOES NOT MATCH BANK RECORD', FAILED: '❌ COULD NOT READ RECEIPT' };
+
+  btnVerify.onclick = async () => {
+    if (!currentFile) return;
+    btnVerify.disabled = true;
+    spin.style.display = 'block';
+    document.getElementById('result').style.display = 'none';
+    try {
+      const fd = new FormData();
+      fd.append('image', currentFile);
+      fd.append('account', document.getElementById('account').value);
+      const res = await fetch('/verify', { method: 'POST', body: fd });
+      const data = await res.json();
+      showResult(data);
+    } catch (e) {
+      showResult({ verdict: 'FAILED', confidence: 'Server error: ' + e.message, fields: {}, steps: [] });
+    } finally {
+      spin.style.display = 'none';
+      btnVerify.disabled = false;
+    }
+  };
+
+  function showResult(d) {
+    const r = document.getElementById('result');
+    const v = document.getElementById('verdict');
+    v.textContent = VERDICT_TEXT[d.verdict] || d.verdict || 'ERROR';
+    if (d.provider && d.verdict === 'VERIFIED') v.textContent += ' · ' + d.provider;
+    v.className = 'verdict v-' + (d.verdict || 'FAILED');
+    document.getElementById('conf').textContent = d.confidence || d.error || '';
+
+    const tbl = document.getElementById('fields');
+    tbl.innerHTML = '';
+    for (const key of ['amount', 'totalDebited', 'date', 'payer', 'receiver', 'txId', 'status']) {
+      const val = d.fields && d.fields[key];
+      if (!val) continue;
+      const tr = document.createElement('tr');
+      if (key === 'amount') tr.className = 'amount-row';
+      tr.innerHTML = '<td>' + LABELS[key] + '</td><td>' + val + '</td>';
+      tbl.appendChild(tr);
+    }
+
+    const mm = document.getElementById('mismatch');
+    mm.style.display = (d.mismatch && d.mismatch.length) ? 'block' : 'none';
+    if (d.mismatch && d.mismatch.length) mm.textContent = '⚠ ' + d.mismatch.join('; ');
+
+    const hint = document.getElementById('hint');
+    hint.style.display = d.hint ? 'block' : 'none';
+    if (d.hint) hint.textContent = d.hint;
+
+    const steps = document.getElementById('steps');
+    steps.innerHTML = '';
+    (d.steps || []).forEach((s) => { const li = document.createElement('li'); li.textContent = s; steps.appendChild(li); });
+
+    r.style.display = 'block';
+    r.scrollIntoView({ behavior: 'smooth' });
+  }
+</script>
+</body>
+</html>
