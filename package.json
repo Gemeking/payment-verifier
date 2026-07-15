@@ -1,17 +1,18 @@
 {
   "name": "payment-verifier",
-  "version": "1.0.0",
-  "description": "CBE & telebirr receipt verifier (trial)",
+  "version": "2.0.0",
+  "description": "CBE & telebirr receipt verifier — Vercel-ready",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
+    "pdf-parse": "^1.1.1"
+  },
+  "devDependencies": {
     "jimp": "0.22.12",
     "jsqr": "^1.4.0",
-    "multer": "^1.4.5-lts.1",
-    "pdf-parse": "^1.1.1",
     "tesseract.js": "^5.1.0"
   }
 }
