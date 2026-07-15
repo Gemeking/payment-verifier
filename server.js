@@ -1,4 +1,4 @@
-// Local development server — on Vercel, public/ is served statically and
+// Local dev  development server — on Vercel, public/ is served statically and
 // api/verify.js runs as a serverless function; this wrapper mimics that.
 const express = require('express');
 const path = require('path');
