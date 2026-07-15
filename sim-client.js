@@ -1,5 +1,5 @@
-// Simulates what the browser does: QR decode + OCR locally, then POST JSON
-// to /api/verify — used to test the Vercel-style flow end to end.
+// Simulates what the browser does: QR decode locally, then POST { qr } to
+// /api/verify — tests the QR-only flow end to end.
 const fs = require('fs');
 const path = require('path');
 const Jimp = require('jimp');
@@ -24,21 +24,14 @@ async function decodeQr(buffer) {
 (async () => {
   const dir = path.join(__dirname, '..');
   const files = ['1772631050697.jpg', 'screenshot_1783919110752.png', 'cbetransaction114.jpg'];
-  const { createWorker } = require('tesseract.js');
-  const worker = await createWorker('eng');
-
   for (const f of files) {
-    const buf = fs.readFileSync(path.join(dir, f));
-    const qr = await decodeQr(buf);
-    const { data } = await worker.recognize(buf);
+    const qr = await decodeQr(fs.readFileSync(path.join(dir, f)));
     const res = await fetch('http://localhost:3311/api/verify', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ qr, ocrText: data.text, account: '' }),
+      body: JSON.stringify({ qr, account: '' }),
     });
-    const out = await res.json();
     console.log('=== ' + f + ' ===');
-    console.log(JSON.stringify(out, null, 1));
+    console.log(JSON.stringify(await res.json(), null, 1));
   }
-  await worker.terminate();
 })();

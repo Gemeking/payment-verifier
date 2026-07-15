@@ -1,6 +1,7 @@
-// Vercel serverless function: receives { qr, ocrText, account } from the
-// browser (which already did QR decoding + OCR locally) and confirms the
-// transaction against the official CBE / telebirr servers.
+// QR-only verification: receives { qr, account } — the QR code content the
+// browser decoded from the receipt — and pulls the transaction straight from
+// the official CBE / telebirr servers. Every field shown comes from the bank
+// record, never from the picture, so a VERIFIED result is 100% authentic.
 const https = require('https');
 const http = require('http');
 const pdfParse = require('pdf-parse');
@@ -53,30 +54,6 @@ function telebirrTxFromQr(qr) {
   return null;
 }
 
-function extractFromOcr(text) {
-  const t = String(text || '').replace(/\s+/g, ' ');
-  const fields = {};
-  let m;
-  if ((m = t.match(/ETB\s*([\d,]+\.\d{2})\s*(?:has been\s*)?debited/i))) fields.amount = m[1];
-  else if ((m = t.match(/[-—]\s*([\d,]+\.\d{2})\s*\(?\s*[E€][TF1I]?B?\s*\)?/i))) fields.amount = m[1];
-  else if ((m = t.match(/(?:Amount|Total Paid|Settled)[^\d]{0,20}([\d,]+\.\d{2})/i))) fields.amount = m[1];
-  else if ((m = t.match(/([\d,]+\.\d{2})/))) fields.amount = m[1];
-
-  if ((m = t.match(/(\d{4}\/\d{2}\/\d{2}[ T]\d{2}:\d{2}:\d{2})/))) fields.date = m[1];
-  else if ((m = t.match(/([A-Z][a-z]{2}\s+\d{1,2},\s*\d{4}\s+\d{1,2}:\d{2}\s*[AP]M)/))) fields.date = m[1];
-  else if ((m = t.match(/(\d{1,2}-[A-Z][a-z]{2}-\d{4}(?:\s+\d{1,2}:\d{2}(?::\d{2})?\s*(?:[AP]M)?)?)/))) fields.date = m[1];
-
-  if ((m = t.match(/\b(FT[A-Z0-9]{8,14})\b/))) fields.txId = m[1];
-  else if ((m = t.match(/Transaction (?:Number|No\.?|ID)\s*:?\s*([A-Z0-9]{8,14})\b/i))) fields.txId = m[1];
-
-  if ((m = t.match(/debited from\s+([A-Z][A-Za-z' ]+?)\s+(?:ETB-\d+\s+)?for\s+([A-Z][A-Za-z' ]+?)(?:\s+ETB-?\d+|-ETB-?\d+|\s+on\b)/i))) {
-    fields.payer = m[1].trim();
-    fields.receiver = m[2].trim();
-  }
-  if (!fields.receiver && (m = t.match(/Transaction To:?\s*([A-Z][A-Z' ]+[A-Z])/))) fields.receiver = m[1].trim();
-  return fields;
-}
-
 function fmtCbeDate(iso) {
   // CBE API returns UTC; Ethiopia is UTC+3
   const d = new Date(iso);
@@ -95,17 +72,14 @@ async function verifyCbeApi(token) {
   }
   const j = JSON.parse(res.body.toString('utf8'));
   return {
-    fields: {
-      provider: 'CBE',
-      amount: j.debitAmount || j.amountCredited,
-      totalDebited: j.amountDebited,
-      date: j.dateTimes && j.dateTimes[0] ? fmtCbeDate(j.dateTimes[0]) : (j.processingDate || null),
-      payer: j.debitAccountHolder || null,
-      receiver: j.creditAccountHolder || null,
-      txId: j.id,
-      status: 'Completed (bank record found)',
-    },
-    compareAmounts: [j.debitAmount, j.amountDebited, j.amountCredited].filter(Boolean),
+    provider: 'CBE',
+    amount: j.debitAmount || j.amountCredited,
+    totalDebited: j.amountDebited,
+    date: j.dateTimes && j.dateTimes[0] ? fmtCbeDate(j.dateTimes[0]) : (j.processingDate || null),
+    payer: j.debitAccountHolder || null,
+    receiver: j.creditAccountHolder || null,
+    txId: j.id,
+    status: 'Completed (bank record found)',
   };
 }
 
@@ -134,7 +108,7 @@ async function verifyCbeLegacy(txId, accountSuffix) {
   const pdf = await pdfParse(res.body);
   const fields = parseCbePdfText(pdf.text);
   if (!fields.txId && !fields.amount) throw new Error('could not read the official CBE receipt');
-  return { fields, compareAmounts: [fields.amount].filter(Boolean) };
+  return fields;
 }
 
 function htmlToText(html) {
@@ -166,16 +140,11 @@ async function verifyTelebirr(txId) {
   }
   if ((m = t.match(/(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})/))) fields.date = m[1] + ' (dd-mm-yyyy)';
   if ((m = t.match(/Total Paid Amount\s+([\d,]+(?:\.\d{1,2})?)\s*Birr/i))) fields.amount = m[1];
-  let settled = null;
-  if ((m = t.match(/([\d,]+(?:\.\d{1,2})?)\s*Birr/i)) && !fields.amount) fields.amount = m[1];
-  if ((m = t.match(/Settled Amount\s+[A-Z0-9]{10}\s+[\d-]+\s+[\d:]+\s+([\d,]+(?:\.\d{1,2})?)\s*Birr/i))) settled = m[1];
+  if (!fields.amount && (m = t.match(/([\d,]+(?:\.\d{1,2})?)\s*Birr/i))) fields.amount = m[1];
   if ((m = t.match(/transaction status\s+([A-Za-z]+)/i))) fields.status = m[1];
-  if (!fields.amount && !settled) throw new Error('telebirr has no record for transaction ' + txId);
-  if (!fields.amount) fields.amount = settled;
-  return { fields, compareAmounts: [fields.amount, settled].filter(Boolean) };
+  if (!fields.amount) throw new Error('telebirr has no record for transaction ' + txId);
+  return fields;
 }
-
-const num = (s) => parseFloat(String(s).replace(/,/g, ''));
 
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
@@ -183,122 +152,95 @@ module.exports = async (req, res) => {
     return res.end(JSON.stringify({ error: 'POST only' }));
   }
   const steps = [];
+  const send = (obj) => {
+    res.setHeader('Content-Type', 'application/json');
+    return res.end(JSON.stringify(obj));
+  };
   try {
     let body = req.body;
     if (typeof body === 'string') body = JSON.parse(body || '{}');
     if (!body) body = {};
     const qr = (body.qr || '').trim() || null;
-    const ocrText = body.ocrText || '';
     const accountSuffix = (body.account || '').replace(/\D/g, '');
 
-    const ocrFields = extractFromOcr(ocrText);
-    const isTelebirrShot = /telebirr|ethio\s*telecom/i.test(ocrText);
-    const looksCbe = /commercial bank of ethiopia|\bCBE\b/i.test(ocrText) || /^FT/i.test(ocrFields.txId || '');
+    if (!qr) {
+      return send({
+        verdict: 'FAILED',
+        confidence: 'No QR code could be read from this image — use the original receipt screenshot (the QR must be sharp and complete)',
+        fields: {},
+        steps: ['no QR code provided'],
+      });
+    }
+    steps.push('QR code content: ' + qr.slice(0, 70));
 
-    let online = null, onlineError = null;
-    const tryOnline = async (label, fn) => {
-      if (online) return;
+    let fields = null, failReason = null, needAccount = false;
+    const attempt = async (label, fn) => {
       try {
-        online = await fn();
+        fields = await fn();
         steps.push('CONFIRMED with the official ' + label + ' server ✔');
       } catch (e) {
-        onlineError = e.message;
-        steps.push(label + ' online check failed: ' + e.message);
+        failReason = e.message;
+        steps.push(label + ' check failed: ' + e.message);
       }
     };
 
-    const telebirrTx = qr ? telebirrTxFromQr(qr) : null;
+    const telebirrTx = telebirrTxFromQr(qr);
 
-    if (qr && /mbreciept\.cbe\.com\.et\//i.test(qr)) {
+    if (/mbreciept\.cbe\.com\.et\//i.test(qr)) {
       const token = qr.split('cbe.com.et/')[1].split(/[?#]/)[0];
-      await tryOnline('CBE', () => verifyCbeApi(token));
-    } else if (qr && /apps\.cbe\.com\.et/i.test(qr)) {
+      await attempt('CBE', () => verifyCbeApi(token));
+    } else if (/apps\.cbe\.com\.et/i.test(qr)) {
       const idMatch = qr.match(/id=([A-Z0-9]+)/i);
-      if (idMatch) await tryOnline('CBE', () => verifyCbeLegacy(idMatch[1], ''));
-    } else if (qr && /ethiotelecom\.et/i.test(qr)) {
+      if (idMatch) await attempt('CBE', () => verifyCbeLegacy(idMatch[1], ''));
+      else failReason = 'unrecognized CBE link in the QR code';
+    } else if (/ethiotelecom\.et/i.test(qr)) {
       const idMatch = qr.match(/receipt\/([A-Z0-9]+)/i);
-      if (idMatch) await tryOnline('telebirr', () => verifyTelebirr(idMatch[1]));
-    } else if (qr && /^FT[A-Z0-9]{6,}$/i.test(qr)) {
+      if (idMatch) await attempt('telebirr', () => verifyTelebirr(idMatch[1]));
+      else failReason = 'unrecognized telebirr link in the QR code';
+    } else if (/^FT[A-Z0-9]{6,}$/i.test(qr)) {
       if (accountSuffix.length >= 5) {
-        await tryOnline('CBE', () => verifyCbeLegacy(qr.toUpperCase(), accountSuffix));
+        await attempt('CBE', () => verifyCbeLegacy(qr.toUpperCase(), accountSuffix));
       } else {
-        onlineError = 'this CBE receipt needs the last 8 digits of the account to pull the bank record';
-        steps.push('QR holds CBE transaction ' + qr + ' — waiting for account digits to verify online');
+        needAccount = true;
+        failReason = 'this CBE QR holds transaction ' + qr.toUpperCase() + ' — CBE needs the last 8 digits of the account to release the record';
+        steps.push('waiting for account digits to query CBE');
       }
     } else if (telebirrTx) {
-      await tryOnline('telebirr', () => verifyTelebirr(telebirrTx));
+      steps.push('telebirr transaction number decoded from QR: ' + telebirrTx);
+      await attempt('telebirr', () => verifyTelebirr(telebirrTx));
+    } else {
+      failReason = 'this QR code is not a CBE or telebirr receipt QR';
     }
 
-    if (!online && ocrFields.txId) {
-      if (/^FT/i.test(ocrFields.txId) && accountSuffix.length >= 5) {
-        await tryOnline('CBE', () => verifyCbeLegacy(ocrFields.txId.toUpperCase(), accountSuffix));
-      } else if (!/^FT/i.test(ocrFields.txId) && (isTelebirrShot || !looksCbe)) {
-        await tryOnline('telebirr', () => verifyTelebirr(ocrFields.txId));
-      }
-    }
-
-    res.setHeader('Content-Type', 'application/json');
-
-    if (online) {
-      const f = online.fields;
-      const mismatch = [];
-      if (ocrFields.amount && online.compareAmounts.length) {
-        const shot = num(ocrFields.amount);
-        const matchesAny = online.compareAmounts.some((a) => Math.abs(num(a) - shot) < 1);
-        if (!matchesAny) mismatch.push(`the picture shows ETB ${ocrFields.amount} but the official record says ETB ${f.amount}`);
-      }
-      if (ocrFields.txId && f.txId && ocrFields.txId.toUpperCase() !== String(f.txId).toUpperCase()) {
-        mismatch.push(`the picture shows transaction ${ocrFields.txId} but the record is ${f.txId}`);
-      }
-      return res.end(JSON.stringify({
-        verdict: mismatch.length ? 'TAMPERED' : 'VERIFIED',
-        provider: f.provider,
-        confidence: mismatch.length
-          ? 'The image does NOT match the official record'
-          : '100% — confirmed against the official ' + f.provider + ' record',
+    if (fields) {
+      return send({
+        verdict: 'VERIFIED',
+        provider: fields.provider,
+        confidence: '100% — every detail below comes from the official ' + fields.provider + ' record, not from the image',
         fields: {
-          amount: f.amount || null,
-          totalDebited: f.totalDebited || null,
-          date: f.date || null,
-          payer: f.payer || null,
-          receiver: f.receiver || null,
-          txId: f.txId || null,
-          status: f.status || null,
-        },
-        mismatch,
-        steps,
-      }));
-    }
-
-    if (ocrFields.amount || ocrFields.txId || qr) {
-      const needAccount = looksCbe && accountSuffix.length < 5;
-      return res.end(JSON.stringify({
-        verdict: 'UNVERIFIED',
-        provider: looksCbe ? 'CBE' : (isTelebirrShot ? 'telebirr' : 'unknown'),
-        confidence: 'Details were read from the image only — NOT confirmed with the bank'
-          + (onlineError ? ' (' + onlineError + ')' : ''),
-        hint: needAccount
-          ? 'Enter the last 8 digits of the account (sender or receiver) above and press Verify again — that lets me pull the official CBE record for a 100% check.'
-          : null,
-        fields: {
-          amount: ocrFields.amount || null,
-          date: ocrFields.date || null,
-          payer: ocrFields.payer || null,
-          receiver: ocrFields.receiver || null,
-          txId: ocrFields.txId || (qr && /^FT/i.test(qr) ? qr : null),
+          amount: fields.amount || null,
+          totalDebited: fields.totalDebited || null,
+          date: fields.date || null,
+          payer: fields.payer || null,
+          receiver: fields.receiver || null,
+          txId: fields.txId || null,
+          status: fields.status || null,
         },
         steps,
-      }));
+      });
     }
 
-    return res.end(JSON.stringify({
-      verdict: 'FAILED',
-      confidence: 'Could not read a QR code or any transaction details from this image',
-      fields: {},
+    return send({
+      verdict: needAccount ? 'NEED_ACCOUNT' : 'FAILED',
+      confidence: failReason || 'verification failed',
+      hint: needAccount
+        ? 'Enter the last 8 digits of the account (yours or the sender’s) above and press Verify again.'
+        : null,
+      fields: { txId: needAccount ? qr.toUpperCase() : null },
       steps,
-    }));
+    });
   } catch (e) {
     res.statusCode = 500;
-    return res.end(JSON.stringify({ error: e.message, steps }));
+    return send({ error: e.message, steps });
   }
 };

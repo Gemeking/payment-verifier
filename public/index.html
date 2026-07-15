@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Payment Verifier — CBE &amp; telebirr</title>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f2f4f8; color: #1c2733; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
@@ -30,24 +29,23 @@
   #result { display: none; }
   .verdict { font-size: 1.25rem; font-weight: 800; padding: 14px; border-radius: 10px; text-align: center; margin-bottom: 6px; }
   .v-VERIFIED { background: #dcfce7; color: #166534; }
-  .v-UNVERIFIED { background: #fef9c3; color: #854d0e; }
-  .v-TAMPERED, .v-FAILED { background: #fee2e2; color: #991b1b; }
+  .v-NEED_ACCOUNT { background: #fef9c3; color: #854d0e; }
+  .v-FAILED { background: #fee2e2; color: #991b1b; }
   .conf { text-align: center; color: #475569; font-size: .88rem; margin-bottom: 14px; }
   table { width: 100%; border-collapse: collapse; }
   td { padding: 9px 4px; border-bottom: 1px solid #eef2f7; font-size: .95rem; }
   td:first-child { color: #64748b; width: 42%; }
   td:last-child { font-weight: 600; text-align: right; word-break: break-all; }
   .amount-row td:last-child { color: #166534; font-size: 1.15rem; }
-  .mismatch { background: #fee2e2; color: #991b1b; border-radius: 8px; padding: 10px; font-size: .88rem; margin-top: 10px; }
   .hint { background: #eff4ff; color: #1d4ed8; border-radius: 8px; padding: 10px; font-size: .88rem; margin-top: 10px; }
   details { margin-top: 12px; }
   summary { color: #94a3b8; font-size: .82rem; cursor: pointer; }
-  details li { font-size: .8rem; color: #64748b; margin: 4px 0 0 18px; }
+  details li { font-size: .8rem; color: #64748b; margin: 4px 0 0 18px; word-break: break-all; }
 </style>
 </head>
 <body>
   <h1>💳 Payment Verifier</h1>
-  <div class="sub">CBE &amp; telebirr receipts — scan or upload a screenshot</div>
+  <div class="sub">CBE &amp; telebirr — verified 100% from the QR code against the official bank servers</div>
 
   <div class="card">
     <div class="drop" id="drop">
@@ -73,7 +71,6 @@
     <div class="verdict" id="verdict"></div>
     <div class="conf" id="conf"></div>
     <table id="fields"></table>
-    <div class="mismatch" id="mismatch" style="display:none"></div>
     <div class="hint" id="hint" style="display:none"></div>
     <details><summary>What I did</summary><ul id="steps"></ul></details>
   </div>
@@ -128,9 +125,9 @@
   // QR codes, which usually needs the black/white threshold pass
   function decodeQrFromImage(img) {
     const passes = [
-      (d) => d,                                   // original
-      (d) => gray(d, 1.4),                        // grayscale + contrast
-      (d) => threshold(gray(d, 1.4), 128),        // hard black/white
+      (d) => d,
+      (d) => gray(d, 1.4),
+      (d) => threshold(gray(d, 1.4), 128),
       (d) => threshold(gray(d, 1.4), 160),
     ];
     for (const maxSide of [1400, 2200]) {
@@ -164,52 +161,29 @@
     return d;
   }
 
-  let ocrWorkerPromise = null;
-  function getOcrWorker() {
-    if (!ocrWorkerPromise) ocrWorkerPromise = Tesseract.createWorker('eng');
-    return ocrWorkerPromise;
-  }
-
   const LABELS = { amount: 'Amount (ETB)', totalDebited: 'Total debited (incl. fees)', date: 'Time sent', payer: 'From (payer)', receiver: 'To (receiver)', txId: 'Transaction ID', status: 'Status' };
-  const VERDICT_TEXT = { VERIFIED: '✅ VERIFIED', UNVERIFIED: '⚠️ UNVERIFIED', TAMPERED: '❌ DOES NOT MATCH BANK RECORD', FAILED: '❌ COULD NOT READ RECEIPT' };
+  const VERDICT_TEXT = { VERIFIED: '✅ VERIFIED', NEED_ACCOUNT: '🔢 ACCOUNT DIGITS NEEDED', FAILED: '❌ NOT VERIFIED' };
 
   btnVerify.onclick = async () => {
     if (!currentFile) return;
     btnVerify.disabled = true;
     progress.style.display = 'block';
     document.getElementById('result').style.display = 'none';
-    const localSteps = [];
     try {
-      const img = await loadBitmap(currentFile);
-
       progressText.textContent = 'Reading QR code…';
+      const img = await loadBitmap(currentFile);
       let qr = null;
       try { qr = decodeQrFromImage(img); } catch (e) {}
-      localSteps.push(qr ? 'QR code read on your device: ' + qr.slice(0, 70) : 'no QR code readable in this image');
-
-      progressText.textContent = 'Reading text on the receipt…';
-      let ocrText = '';
-      try {
-        const worker = await getOcrWorker();
-        const canvas = drawToCanvas(img, 1600);
-        const { data } = await worker.recognize(canvas);
-        ocrText = data.text || '';
-        localSteps.push('receipt text read on your device (OCR)');
-      } catch (e) {
-        localSteps.push('OCR failed: ' + e.message);
-      }
 
       progressText.textContent = 'Checking with the official bank servers…';
       const res = await fetch('/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr, ocrText, account: document.getElementById('account').value }),
+        body: JSON.stringify({ qr, account: document.getElementById('account').value }),
       });
-      const data = await res.json();
-      data.steps = localSteps.concat(data.steps || []);
-      showResult(data);
+      showResult(await res.json());
     } catch (e) {
-      showResult({ verdict: 'FAILED', confidence: 'Error: ' + e.message, fields: {}, steps: localSteps });
+      showResult({ verdict: 'FAILED', confidence: 'Error: ' + e.message, fields: {}, steps: [] });
     } finally {
       progress.style.display = 'none';
       btnVerify.disabled = false;
@@ -236,10 +210,6 @@
       tr.append(td1, td2);
       tbl.appendChild(tr);
     }
-
-    const mm = document.getElementById('mismatch');
-    mm.style.display = (d.mismatch && d.mismatch.length) ? 'block' : 'none';
-    if (d.mismatch && d.mismatch.length) mm.textContent = '⚠ ' + d.mismatch.join('; ');
 
     const hint = document.getElementById('hint');
     hint.style.display = d.hint ? 'block' : 'none';
