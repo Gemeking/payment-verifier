@@ -6,7 +6,7 @@ const verify = require('./api/verify');
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '12mb' }));
 app.post('/api/verify', (req, res) => verify(req, res));
 
 app.get('/ping', (req, res) => res.send('ok'));

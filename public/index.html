@@ -5,7 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Payment Verifier — CBE &amp; telebirr</title>
 <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
-<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: #f2f4f8; color: #1c2733; min-height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 24px 16px; }
@@ -168,12 +167,6 @@
   const LABELS = { amount: 'Amount (ETB)', totalDebited: 'Total debited (incl. fees)', date: 'Time sent', payer: 'From (payer)', receiver: 'To (receiver)', txId: 'Transaction ID', status: 'Status' };
   const VERDICT_TEXT = { VERIFIED: '✅ VERIFIED', NEED_ACCOUNT: '🔢 ACCOUNT DIGITS NEEDED', CHECK_LINK: '🔗 OPEN OFFICIAL RECEIPT', FAILED: '❌ NOT VERIFIED' };
 
-  let ocrWorkerPromise = null;
-  function getOcrWorker() {
-    if (!ocrWorkerPromise) ocrWorkerPromise = Tesseract.createWorker('eng');
-    return ocrWorkerPromise;
-  }
-
   btnVerify.onclick = async () => {
     const manualId = document.getElementById('txid').value.trim();
     if (!currentFile && !manualId) return;
@@ -181,29 +174,26 @@
     progress.style.display = 'block';
     document.getElementById('result').style.display = 'none';
     try {
-      let qr = null, ocrText = '';
+      let qr = null, imageData = null;
       if (currentFile) {
         progressText.textContent = 'Reading QR code…';
         const img = await loadBitmap(currentFile);
         try { qr = decodeQrFromImage(img); } catch (e) {}
 
-        // QR unreadable — read the transaction ID off the receipt instead
-        // (the result still comes only from the bank server)
+        // QR unreadable — send the picture so the server can read the
+        // transaction ID off it (the result still comes only from the bank)
         if (!qr && !manualId) {
-          progressText.textContent = 'No QR found — reading the transaction ID from the receipt…';
-          try {
-            const worker = await getOcrWorker();
-            const { data } = await worker.recognize(drawToCanvas(img, 1600));
-            ocrText = data.text || '';
-          } catch (e) {}
+          imageData = drawToCanvas(img, 1600).toDataURL('image/jpeg', 0.85);
+          progressText.textContent = 'No QR found — reading the receipt on the server (can take ~20s the first time)…';
+        } else {
+          progressText.textContent = 'Checking with the official bank servers…';
         }
       }
 
-      progressText.textContent = 'Checking with the official bank servers…';
       const res = await fetch('/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr, ocrText, txId: manualId, account: document.getElementById('account').value }),
+        body: JSON.stringify({ qr, image: imageData, txId: manualId, account: document.getElementById('account').value }),
       });
       showResult(await res.json());
     } catch (e) {

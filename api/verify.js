@@ -213,6 +213,22 @@ function o0Variants(id) {
   return [...new Set(variants)].sort((a, b) => dist(a) - dist(b));
 }
 
+// Server-side OCR — runs on the always-on server so it works no matter how
+// slow the visitor's connection is (lazy-loaded; first call takes ~15s)
+let ocrWorkerPromise = null;
+function getOcrWorker() {
+  if (!ocrWorkerPromise) {
+    const { createWorker } = require('tesseract.js');
+    ocrWorkerPromise = createWorker('eng');
+  }
+  return ocrWorkerPromise;
+}
+async function ocrImage(buffer) {
+  const worker = await getOcrWorker();
+  const { data } = await worker.recognize(buffer);
+  return data.text || '';
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.statusCode = 405;
@@ -229,8 +245,19 @@ module.exports = async (req, res) => {
     if (!body) body = {};
     const qr = (body.qr || '').trim() || null;
     const manualId = (body.txId || '').trim().toUpperCase() || null;
-    const ocrText = body.ocrText || '';
+    let ocrText = body.ocrText || '';
     const accountSuffix = (body.account || '').replace(/\D/g, '');
+
+    // no QR and no typed ID — read the receipt text here on the server
+    if (!qr && !manualId && !ocrText && body.image) {
+      try {
+        const b64 = String(body.image).replace(/^data:image\/\w+;base64,/, '');
+        ocrText = await ocrImage(Buffer.from(b64, 'base64'));
+        steps.push('receipt text read on the server (OCR)');
+      } catch (e) {
+        steps.push('server OCR failed: ' + e.message);
+      }
+    }
 
     let fields = null, failReason = null, needAccount = false;
     const attempt = async (label, fn) => {
