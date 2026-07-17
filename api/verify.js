@@ -255,10 +255,20 @@ function o0Variants(id) {
 }
 
 // CBE SMS / receipt carries a full mbreciept.cbe.com.et link whose token
-// unlocks the record with NO account digits — the best possible CBE route
+// unlocks the record with NO account digits — the best possible CBE route.
+// The URL often wraps across lines in a screenshot (".../v2" then
+// "-hfHCxz..."), so join line breaks inside the token before matching.
 function cbeTokenFromText(t) {
-  const m = String(t).match(/mbreciept\.cbe\.com\.et\/?\s*(v2-[A-Za-z0-9_-]{6,})/i);
-  return m ? m[1] : null;
+  const s = String(t).replace(/\r/g, '');
+  const at = s.search(/mbreciept\.cbe\.com\.et\//i);
+  if (at >= 0) {
+    let tail = s.slice(at).replace(/mbreciept\.cbe\.com\.et\//i, '').replace(/\n/g, '');
+    const m = tail.match(/(v2-[A-Za-z0-9_-]{6,})/i);
+    if (m) return m[1];
+  }
+  // bare token with no host (rare OCR case)
+  const m2 = s.replace(/\n/g, '').match(/(v2-[A-Za-z0-9]{10,})/);
+  return m2 ? m2[1] : null;
 }
 // legacy apps.cbe.com.et link carries the FT id (and sometimes the account)
 function cbeLegacyFromText(t) {
@@ -439,11 +449,16 @@ module.exports = async (req, res) => {
 
     // 1b. Full official link found in QR / pasted text / OCR. The CBE
       //     mbreciept link verifies with NO account digits — best route.
+    let sawCbeLink = false;
     if (!fields) {
       const token = cbeTokenFromText(ocrText) || cbeTokenFromText(qr || '') || cbeTokenFromText(rawManual);
       if (token) {
+        sawCbeLink = true;
         steps.push('CBE receipt link found — verifying directly (no account needed)');
         await attempt('CBE', () => verifyCbeApi(token));
+      } else if (/mbreciept\.cbe\.com\.et/i.test(ocrText)) {
+        sawCbeLink = true;
+        steps.push('a CBE link is in the image but its code did not read cleanly');
       }
     }
     if (!fields) {
@@ -523,7 +538,11 @@ module.exports = async (req, res) => {
 
     return send({
       verdict: needAccount ? 'NEED_ACCOUNT' : 'FAILED',
-      confidence: failReason || 'Could not find a QR code or a transaction ID in this image — type the transaction ID manually and try again',
+      confidence: needAccount
+        ? failReason
+        : sawCbeLink
+          ? 'This is a CBE SMS with a verification link, but the link’s code did not read clearly from the picture. Tap “Copy text” on the SMS and paste it into the box — it will verify instantly with no account digits.'
+          : (failReason || 'Could not read a QR code, a link, or a transaction ID from this image — tap “Copy text” on the message and paste it, or type the transaction ID.'),
       hint: needAccount
         ? 'Enter the last 8 digits of the account (yours or the sender’s) above and press Verify again.'
         : null,
