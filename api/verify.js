@@ -143,6 +143,8 @@ async function verifyTelebirr(txId, timeoutMs = 12000) {
 }
 
 async function verifyTelebirrLive(txId, timeoutMs) {
+  // test hook: simulates hosting regions that cannot reach ethiotelecom
+  if (process.env.TELEBIRR_TEST_BLOCK) throw new Error('timeout contacting transactioninfo.ethiotelecom.et');
   const url = 'https://transactioninfo.ethiotelecom.et/receipt/' + encodeURIComponent(txId);
   const res = await fetchUrl(url, {}, 5, timeoutMs);
   if (res.status !== 200) throw new Error('telebirr server answered HTTP ' + res.status);
@@ -251,15 +253,15 @@ module.exports = async (req, res) => {
     let telebirrLookups = 0;
     let fallbackFields = null;
     let telebirrBlocked = false;
-    const triedTelebirrIds = [];
+    const allTelebirrIds = []; // every variant, even ones we never reached
     const tryTelebirr = async (id, exact = false) => {
       const list = exact ? [id] : o0Variants(id);
+      for (const v of list) if (!allTelebirrIds.includes(v)) allTelebirrIds.push(v);
       for (const v of list) {
         if (fields || telebirrBlocked || telebirrLookups >= 10) return;
-        if (!triedTelebirrIds.includes(v)) triedTelebirrIds.push(v);
         telebirrLookups++;
         try {
-          const f = await verifyTelebirr(v);
+          const f = await verifyTelebirr(v, 7000);
           const recAmounts = [f.amount, f.totalDebited].filter(Boolean).map((a) => parseFloat(String(a).replace(/,/g, '')));
           const amountOk = ocrAmount == null || recAmounts.some((a) => Math.abs(a - ocrAmount) < 1);
           const timeOk = ocrTime == null || String(f.date || '').includes(ocrTime);
@@ -350,13 +352,14 @@ module.exports = async (req, res) => {
     }
 
     // the hosting region can't reach ethiotelecom — give the browser the
-    // official receipt links (they open fine on Ethiopian internet)
-    if (!fields && telebirrBlocked && triedTelebirrIds.length) {
+    // official receipt links for EVERY O/0 variant (they open fine on
+    // Ethiopian internet; wrong variants just show an empty page)
+    if (!fields && telebirrBlocked && allTelebirrIds.length) {
       return send({
         verdict: 'CHECK_LINK',
         provider: 'telebirr',
-        confidence: 'This server cannot reach telebirr from its hosting region — tap a link below to open the OFFICIAL ethiotelecom receipt directly (works on Ethiopian internet). If the page shows the payment, it is 100% genuine.',
-        links: triedTelebirrIds.slice(0, 4).map((id) => ({
+        confidence: 'This server cannot reach telebirr from its hosting region — tap the links below to open the OFFICIAL ethiotelecom receipt (works on Ethiopian internet). The link that shows your payment is the real record; if none show it, the payment is NOT genuine.',
+        links: allTelebirrIds.slice(0, 4).map((id) => ({
           id,
           url: 'https://transactioninfo.ethiotelecom.et/receipt/' + encodeURIComponent(id),
         })),
