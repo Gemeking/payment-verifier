@@ -139,7 +139,10 @@ async function verifyTelebirr(txId) {
     fields.receiver = m[1].trim();
   }
   if ((m = t.match(/(\d{2}-\d{2}-\d{4}\s+\d{2}:\d{2}:\d{2})/))) fields.date = m[1] + ' (dd-mm-yyyy)';
-  if ((m = t.match(/Total Paid Amount\s+([\d,]+(?:\.\d{1,2})?)\s*Birr/i))) fields.amount = m[1];
+  // "Settled Amount" is the transferred money; "Total Paid" includes fees
+  if ((m = t.match(/Settled Amount\s+[A-Z0-9]{10}\s+[\d-]+\s+[\d:]+\s+([\d,]+(?:\.\d{1,2})?)\s*Birr/i))) fields.amount = m[1];
+  if ((m = t.match(/Total Paid Amount\s+([\d,]+(?:\.\d{1,2})?)\s*Birr/i))) fields.totalDebited = m[1];
+  if (!fields.amount) fields.amount = fields.totalDebited;
   if (!fields.amount && (m = t.match(/([\d,]+(?:\.\d{1,2})?)\s*Birr/i))) fields.amount = m[1];
   if ((m = t.match(/transaction status\s+([A-Za-z]+)/i))) fields.status = m[1];
   if (!fields.amount) throw new Error('telebirr has no record for transaction ' + txId);
@@ -156,13 +159,37 @@ function txCandidatesFromText(text) {
   const ftRe = /\bFT[A-Z0-9]{8,12}\b/g;
   while ((m = ftRe.exec(t))) push(m[0]);
   const nearRe = /TRANSACTION\s*(?:NUMBER|NO\.?|ID)\s*:?\s*([A-Z0-9]{10})\b/g;
-  while ((m = nearRe.exec(t))) { push(m[1]); push(m[1].replace(/O/g, '0')); }
+  while ((m = nearRe.exec(t))) push(m[1]);
   const tenRe = /\b([A-Z0-9]{10})\b/g;
   while ((m = tenRe.exec(t))) {
     const v = m[1];
-    if (/[A-Z]/.test(v) && /\d/.test(v) && !/^FT/.test(v)) { push(v); push(v.replace(/O/g, '0')); }
+    if (/[A-Z]/.test(v) && /\d/.test(v) && !/^FT/.test(v)) push(v);
   }
-  return out.slice(0, 8);
+  // dedupe IDs that differ only by O/0 — tryTelebirr expands those variants
+  const seen = new Set();
+  return out.filter((v) => {
+    const k = v.replace(/O/g, '0');
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  }).slice(0, 4);
+}
+
+// OCR confuses the letter O with zero — enumerate every O/0 combination,
+// nearest to the original first (each is validated by the telebirr server,
+// so a wrong guess can never verify)
+function o0Variants(id) {
+  const idx = [];
+  for (let i = 0; i < id.length; i++) if (id[i] === 'O' || id[i] === '0') idx.push(i);
+  const n = Math.min(idx.length, 4);
+  const variants = [];
+  for (let mask = 0; mask < (1 << n); mask++) {
+    const arr = id.split('');
+    for (let b = 0; b < n; b++) arr[idx[b]] = (mask >> b) & 1 ? 'O' : '0';
+    variants.push(arr.join(''));
+  }
+  const dist = (a) => { let d = 0; for (let i = 0; i < a.length; i++) if (a[i] !== id[i]) d++; return d; };
+  return [...new Set(variants)].sort((a, b) => dist(a) - dist(b));
 }
 
 module.exports = async (req, res) => {
@@ -195,6 +222,39 @@ module.exports = async (req, res) => {
         steps.push(label + ' check failed: ' + e.message);
       }
     };
+    // hints from the screenshot, used only to pick between O/0 variants when
+    // more than one yields a bank record
+    const amtM = String(ocrText).match(/([\d,]+\.\d{2})\s*ETB/i);
+    const ocrAmount = amtM ? parseFloat(amtM[1].replace(/,/g, '')) : null;
+    const timeM = String(ocrText).match(/(\d{2}:\d{2}:\d{2})/);
+    const ocrTime = timeM ? timeM[1] : null;
+
+    let telebirrLookups = 0;
+    let fallbackFields = null;
+    const tryTelebirr = async (id, exact = false) => {
+      const list = exact ? [id] : o0Variants(id);
+      for (const v of list) {
+        if (fields || telebirrLookups >= 10) return;
+        telebirrLookups++;
+        try {
+          const f = await verifyTelebirr(v);
+          const recAmounts = [f.amount, f.totalDebited].filter(Boolean).map((a) => parseFloat(String(a).replace(/,/g, '')));
+          const amountOk = ocrAmount == null || recAmounts.some((a) => Math.abs(a - ocrAmount) < 1);
+          const timeOk = ocrTime == null || String(f.date || '').includes(ocrTime);
+          if (exact || amountOk || timeOk) {
+            fields = f;
+            steps.push('CONFIRMED with the official telebirr server ✔ (transaction ' + v + ')');
+          } else if (!fallbackFields) {
+            fallbackFields = f;
+            steps.push('telebirr record exists for ' + v + ' but its amount/time differ from this screenshot — kept searching');
+          }
+        } catch (e) {
+          failReason = e.message;
+          steps.push('telebirr: no record for ' + v);
+        }
+      }
+    };
+
     let pendingCbeId = null;
     const tryCbeId = async (id) => {
       if (accountSuffix.length >= 5) {
@@ -219,12 +279,12 @@ module.exports = async (req, res) => {
         if (idMatch) await attempt('CBE', () => verifyCbeLegacy(idMatch[1], ''));
       } else if (/ethiotelecom\.et/i.test(qr)) {
         const idMatch = qr.match(/receipt\/([A-Z0-9]+)/i);
-        if (idMatch) await attempt('telebirr', () => verifyTelebirr(idMatch[1]));
+        if (idMatch) await tryTelebirr(idMatch[1], true);
       } else if (/^FT[A-Z0-9]{6,}$/i.test(qr)) {
         await tryCbeId(qr.toUpperCase());
       } else if (telebirrTx) {
         steps.push('telebirr transaction number decoded from QR: ' + telebirrTx);
-        await attempt('telebirr', () => verifyTelebirr(telebirrTx));
+        await tryTelebirr(telebirrTx, true);
       } else {
         steps.push('QR is not a CBE/telebirr receipt QR — falling back to transaction ID search');
       }
@@ -235,7 +295,7 @@ module.exports = async (req, res) => {
     // 2. Manually typed transaction ID
     if (!fields && manualId) {
       if (/^FT[A-Z0-9]{6,}$/.test(manualId)) await tryCbeId(manualId);
-      else if (/^[A-Z0-9]{10}$/.test(manualId)) await attempt('telebirr', () => verifyTelebirr(manualId));
+      else if (/^[A-Z0-9]{10}$/.test(manualId)) await tryTelebirr(manualId);
       else { failReason = manualId + ' does not look like a CBE (FT…) or telebirr (10 characters) transaction ID'; }
     }
 
@@ -248,8 +308,15 @@ module.exports = async (req, res) => {
       for (const c of candidates) {
         if (fields) break;
         if (/^FT/.test(c)) await tryCbeId(c);
-        else await attempt('telebirr', () => verifyTelebirr(c));
+        else await tryTelebirr(c);
       }
+    }
+
+    // a bank record was found but didn't match the screenshot's amount/time —
+    // still a real record, but flag it for the user to double-check
+    if (!fields && fallbackFields) {
+      fields = fallbackFields;
+      steps.push('NOTE: verify the transaction ID on this record matches your receipt');
     }
 
     if (fields) {
