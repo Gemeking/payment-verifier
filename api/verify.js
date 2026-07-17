@@ -254,6 +254,38 @@ function o0Variants(id) {
   return [...new Set(variants)].sort((a, b) => (rank(a) - rank(b)) || (dist(a) - dist(b)));
 }
 
+// Broader OCR-confusion correction for codes read off a photo. Each character
+// gets a small set of look-alikes; we generate the closest variants first and
+// cap the count so the bank isn't hammered (telebirr rate-limits to ~5). Every
+// variant is checked against the bank, so a wrong guess can never verify.
+const OCR_CONFUSIONS = {
+  O: ['O', '0', 'Q', '9', 'D'], '0': ['0', 'O', 'Q', 'D'], Q: ['Q', 'O', '0'],
+  '9': ['9', 'O', 'g', 'q'], D: ['D', '0', 'O'],
+  I: ['I', '1', 'L', 'T'], '1': ['1', 'I', 'L'], L: ['L', '1', 'I'],
+  S: ['S', '5'], '5': ['5', 'S'], B: ['B', '8'], '8': ['8', 'B'],
+  Z: ['Z', '2'], '2': ['2', 'Z'], G: ['G', '6'], '6': ['6', 'G'],
+  '7': ['7', 'T'], T: ['T', '7', 'I'],
+};
+function ocrVariants(id, cap = 6) {
+  const positions = [];
+  for (let i = 0; i < id.length; i++) {
+    const alts = OCR_CONFUSIONS[id[i]];
+    if (alts && alts.length > 1) positions.push({ i, alts });
+  }
+  let results = [id];
+  for (const { i, alts } of positions) {
+    const next = [];
+    for (const r of results) for (const a of alts) {
+      const s = r.slice(0, i) + a + r.slice(i + 1);
+      if (!next.includes(s)) next.push(s);
+    }
+    results = next;
+    if (results.length > 400) break; // guard against blow-up
+  }
+  const dist = (a) => { let d = 0; for (let k = 0; k < a.length; k++) if (a[k] !== id[k]) d++; return d; };
+  return [...new Set(results)].sort((a, b) => dist(a) - dist(b)).slice(0, cap);
+}
+
 // CBE SMS / receipt carries a full mbreciept.cbe.com.et link whose token
 // unlocks the record with NO account digits — the best possible CBE route.
 // The URL often wraps across lines in a screenshot (".../v2" then
@@ -299,6 +331,48 @@ async function ocrImage(buffer) {
   return data.text || '';
 }
 
+// does this OCR text contain a COMPLETE code we can actually verify? (the
+// bare host doesn't count — we need the full token/id, or later passes that
+// might read it get skipped)
+function hasUsefulText(t) {
+  return !!(cbeTokenFromText(t) || cbeLegacyFromText(t) || telebirrIdFromText(t)
+    || txCandidatesFromText(t).length);
+}
+
+// Camera photos (glare, angle, blur, low contrast) defeat a single OCR pass.
+// Try several preprocessing variants at high resolution and stop at the first
+// that yields something verifiable. Returns { text, note }.
+async function ocrRobust(buffer) {
+  // Pass 0: the original image untouched — best for clean screenshots, where
+  // any resizing/filtering only blurs already-sharp text
+  let firstText = '';
+  try {
+    firstText = await ocrImage(buffer);
+    if (hasUsefulText(firstText)) return { text: firstText, note: 'clean image' };
+  } catch (e) {}
+
+  // Harder inputs (camera photos): enhancement passes at higher resolution
+  const Jimp = require('jimp');
+  const base = await Jimp.read(buffer);
+  const TARGET = 2100; // bounded for Render memory
+  const passes = [
+    { note: 'enhanced', fn: (i) => i.greyscale().normalize().contrast(0.15) },
+    { note: 'inverted (dark mode)', fn: (i) => i.invert().greyscale().normalize().contrast(0.15) },
+    { note: 'high-contrast black/white', fn: (i) => i.greyscale().normalize().contrast(0.55) },
+    { note: 'sharpened', fn: (i) => i.greyscale().normalize().convolute([[0, -1, 0], [-1, 5, -1], [0, -1, 0]]).contrast(0.2) },
+  ];
+  for (const p of passes) {
+    let img = base.clone();
+    if (img.bitmap.width < TARGET) img = img.resize(TARGET, Jimp.AUTO);
+    p.fn(img);
+    let text = '';
+    try { text = await ocrImage(await img.getBufferAsync(Jimp.MIME_PNG)); } catch (e) { continue; }
+    if (!firstText) firstText = text;
+    if (hasUsefulText(text)) return { text, note: p.note };
+  }
+  return { text: firstText, note: 'no clear code found' };
+}
+
 module.exports = async (req, res) => {
   if (req.method !== 'POST') {
     res.statusCode = 405;
@@ -326,26 +400,14 @@ module.exports = async (req, res) => {
     }
     const accountSuffix = (body.account || '').replace(/\D/g, '');
 
-    // no QR, no typed ID, no pasted text — read the receipt text here on the server
+    // no QR, no typed ID, no pasted text — read the receipt text here on the
+    // server with multiple enhancement passes (robust for camera photos)
     if (!qr && !manualId && !pastedText && !ocrText && body.image) {
       try {
         const buf = Buffer.from(String(body.image).replace(/^data:image\/\w+;base64,/, ''), 'base64');
-        ocrText = await ocrImage(buf);
-        steps.push('receipt text read on the server (OCR)');
-        // dark-mode screenshots (white text on black, e.g. *889# USSD
-        // confirmations) often read better with inverted colors
-        if (!txCandidatesFromText(ocrText).length) {
-          try {
-            const Jimp = require('jimp');
-            const img = await Jimp.read(buf);
-            img.invert().grayscale().contrast(0.3);
-            const t2 = await ocrImage(await img.getBufferAsync(Jimp.MIME_PNG));
-            if (txCandidatesFromText(t2).length) {
-              ocrText = t2;
-              steps.push('dark screenshot detected — re-read with inverted colors');
-            }
-          } catch (e) {}
-        }
+        const { text, note } = await ocrRobust(buf);
+        ocrText = text;
+        steps.push('receipt text read on the server (OCR — ' + note + ')');
       } catch (e) {
         steps.push('server OCR failed: ' + e.message);
       }
@@ -374,7 +436,8 @@ module.exports = async (req, res) => {
     let telebirrBlocked = false;
     const allTelebirrIds = []; // every variant, even ones we never reached
     const tryTelebirr = async (id, exact = false) => {
-      const list = exact ? [id] : o0Variants(id);
+      // telebirr rate-limits to ~5 lookups/minute, so keep variant tries low
+      const list = exact ? [id] : ocrVariants(id, 4);
       for (const v of list) if (!allTelebirrIds.includes(v)) allTelebirrIds.push(v);
       for (const v of list) {
         if (fields || telebirrBlocked || telebirrLookups >= 10) return;
@@ -409,8 +472,8 @@ module.exports = async (req, res) => {
     let pendingCbeId = null;
     const tryCbeId = async (id) => {
       if (accountSuffix.length >= 5) {
-        // OCR mixes up O and 0 in CBE IDs too — try the likely variants
-        for (const v of o0Variants(id).slice(0, 4)) {
+        // OCR misreads characters in CBE IDs too — try the likely variants
+        for (const v of ocrVariants(id, 6)) {
           if (fields) break;
           await attempt('CBE', () => verifyCbeLegacy(v, accountSuffix));
         }
@@ -469,7 +532,8 @@ module.exports = async (req, res) => {
       const tbId = telebirrIdFromText(ocrText) || telebirrIdFromText(rawManual);
       if (tbId) {
         steps.push('telebirr transaction number found in text: ' + tbId);
-        await tryTelebirr(tbId, true);
+        // from OCR/text (not an exact QR), so allow character-correction
+        await tryTelebirr(tbId, false);
       }
     }
 

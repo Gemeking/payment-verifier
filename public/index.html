@@ -22,6 +22,8 @@
   .ghost { background: #eef2f7; color: #1c2733; }
   input[type=text], textarea { width: 100%; margin-top: 12px; padding: 11px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: .95rem; font-family: inherit; resize: vertical; }
   .note { font-size: .78rem; color: #94a3b8; margin-top: 6px; }
+  .method { font-weight: 700; color: #166534; font-size: .95rem; }
+  .method2 { font-weight: 700; color: #475569; font-size: .95rem; margin-top: 18px; padding-top: 16px; border-top: 1px solid #eef2f7; }
   #preview { max-width: 100%; max-height: 260px; border-radius: 10px; margin-top: 12px; display: none; }
   .progress { display: none; text-align: center; color: #2563eb; font-size: .9rem; margin-top: 12px; }
   .spinner { display: inline-block; vertical-align: middle; margin-right: 8px; width: 18px; height: 18px; border: 3px solid #dbe4f0; border-top-color: #2563eb; border-radius: 50%; animation: spin .8s linear infinite; }
@@ -49,9 +51,14 @@
   <div class="sub">CBE &amp; telebirr — verified 100% from the QR code against the official bank servers</div>
 
   <div class="card">
+    <div class="method">✅ Most reliable — paste the SMS text or transaction ID</div>
+    <textarea id="paste" rows="3" placeholder="Tap ‘Copy text’ on the CBE / telebirr SMS and paste it here"></textarea>
+    <input type="text" id="txid" placeholder="…or type the transaction ID (FT… or telebirr no.) / paste the link" maxlength="120">
+
+    <div class="method2">📷 Or scan a receipt image</div>
     <div class="drop" id="drop">
       <div class="big">📷</div>
-      <p><b>Tap to scan / upload a receipt</b><br>or drag &amp; drop the screenshot here</p>
+      <p><b>Tap to upload / photograph a receipt</b><br>or drag &amp; drop it here</p>
     </div>
     <input type="file" id="file" accept="image/*" hidden>
     <input type="file" id="cam" accept="image/*" capture="environment" hidden>
@@ -59,10 +66,11 @@
       <button class="ghost" id="btnCam">📸 Camera</button>
       <button class="ghost" id="btnFile">🖼️ Upload</button>
     </div>
-    <textarea id="paste" rows="3" placeholder="Best for SMS: tap ‘Copy text’ on the CBE/telebirr message, then paste it here"></textarea>
-    <input type="text" id="txid" placeholder="…or type the transaction ID / paste the receipt link" maxlength="120">
-    <input type="text" id="account" placeholder="CBE account — last 8 digits (only for old receipts)" maxlength="16">
-    <div class="note">A CBE <b>SMS</b> contains a verification link — paste its text above and it verifies with no account digits. The account box is only needed for old CBE receipts that have no link.</div>
+    <div class="note">Photos work best for receipts with a <b>QR code</b>. For SMS messages, pasting the text is far more accurate than a photo — a blurry photo can misread the code.</div>
+
+    <input type="text" id="account" placeholder="CBE account — last 8 digits (only for old receipts with no link)" maxlength="16">
+    <div class="note">Only old CBE receipts that have no verification link need these digits — entered once, remembered on this device.</div>
+
     <img id="preview" alt="receipt preview">
     <div class="btns">
       <button class="primary" id="btnVerify" disabled>Verify payment</button>
@@ -186,11 +194,11 @@
         const img = await loadBitmap(currentFile);
         try { qr = decodeQrFromImage(img); } catch (e) {}
 
-        // QR unreadable — send the picture so the server can read the
-        // transaction ID off it (the result still comes only from the bank)
+        // QR unreadable — send the picture at high resolution so the server
+        // OCR has detail to work with (result still comes only from the bank)
         if (!qr && !manualId) {
-          imageData = drawToCanvas(img, 1600).toDataURL('image/jpeg', 0.85);
-          progressText.textContent = 'No QR found — reading the receipt on the server (can take ~20s the first time)…';
+          imageData = drawToCanvas(img, 2400).toDataURL('image/jpeg', 0.92);
+          progressText.textContent = 'No QR found — reading the receipt on the server (can take up to a minute the first time)…';
         } else {
           progressText.textContent = 'Checking with the official bank servers…';
         }
