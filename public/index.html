@@ -60,8 +60,8 @@
       <button class="ghost" id="btnFile">🖼️ Upload</button>
     </div>
     <input type="text" id="txid" placeholder="Optional: type the transaction ID (FT… or telebirr no.)" maxlength="20">
-    <input type="text" id="account" placeholder="Optional: CBE account — last 8 digits" maxlength="16">
-    <div class="note">CBE receipts need the account digits; you can even verify with no image if you type the transaction ID.</div>
+    <input type="text" id="account" placeholder="CBE account — last 8 digits (enter once, remembered)" maxlength="16">
+    <div class="note">CBE requires these digits to release its records — enter them once and this device remembers them for every future check.</div>
     <img id="preview" alt="receipt preview">
     <div class="btns">
       <button class="primary" id="btnVerify" disabled>Verify payment</button>
@@ -86,7 +86,11 @@
   const btnVerify = document.getElementById('btnVerify');
   const progress = document.getElementById('progress');
   const progressText = document.getElementById('progressText');
+  const accountEl = document.getElementById('account');
   let currentFile = null;
+
+  // CBE account digits are remembered on this device after the first entry
+  try { accountEl.value = localStorage.getItem('cbeAccount') || ''; } catch (e) {}
 
   function setFile(f) {
     if (!f) return;
@@ -190,12 +194,24 @@
         }
       }
 
+      const account = accountEl.value.trim();
+      if (account.replace(/\D/g, '').length >= 5) {
+        try { localStorage.setItem('cbeAccount', account); } catch (e) {}
+      }
       const res = await fetch('/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr, image: imageData, txId: manualId, account: document.getElementById('account').value }),
+        body: JSON.stringify({ qr, image: imageData, txId: manualId, account }),
       });
-      showResult(await res.json());
+      const data = await res.json();
+      if (data.verdict === 'NEED_ACCOUNT') {
+        accountEl.style.borderColor = '#dc2626';
+        accountEl.focus();
+        accountEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      } else {
+        accountEl.style.borderColor = '#cbd5e1';
+      }
+      showResult(data);
     } catch (e) {
       showResult({ verdict: 'FAILED', confidence: 'Error: ' + e.message, fields: {}, steps: [] });
     } finally {
