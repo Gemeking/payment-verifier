@@ -123,9 +123,28 @@ function htmlToText(html) {
     .trim();
 }
 
-async function verifyTelebirr(txId) {
+// ethiotelecom rate-limits lookups (5 per window), so remember results
+const telebirrCache = new Map();
+
+async function verifyTelebirr(txId, timeoutMs = 12000) {
+  const cached = telebirrCache.get(txId);
+  if (cached) {
+    if (cached.error) throw new Error(cached.error);
+    return { ...cached.fields };
+  }
+  try {
+    const fields = await verifyTelebirrLive(txId, timeoutMs);
+    telebirrCache.set(txId, { fields });
+    return fields;
+  } catch (e) {
+    if (!/timeout contacting/i.test(e.message)) telebirrCache.set(txId, { error: e.message });
+    throw e;
+  }
+}
+
+async function verifyTelebirrLive(txId, timeoutMs) {
   const url = 'https://transactioninfo.ethiotelecom.et/receipt/' + encodeURIComponent(txId);
-  const res = await fetchUrl(url);
+  const res = await fetchUrl(url, {}, 5, timeoutMs);
   if (res.status !== 200) throw new Error('telebirr server answered HTTP ' + res.status);
   const t = htmlToText(res.body.toString('utf8'));
   if (!/telebirr/i.test(t)) throw new Error('telebirr has no record of transaction ' + txId);
@@ -231,10 +250,13 @@ module.exports = async (req, res) => {
 
     let telebirrLookups = 0;
     let fallbackFields = null;
+    let telebirrBlocked = false;
+    const triedTelebirrIds = [];
     const tryTelebirr = async (id, exact = false) => {
       const list = exact ? [id] : o0Variants(id);
       for (const v of list) {
-        if (fields || telebirrLookups >= 10) return;
+        if (fields || telebirrBlocked || telebirrLookups >= 10) return;
+        if (!triedTelebirrIds.includes(v)) triedTelebirrIds.push(v);
         telebirrLookups++;
         try {
           const f = await verifyTelebirr(v);
@@ -250,7 +272,15 @@ module.exports = async (req, res) => {
           }
         } catch (e) {
           failReason = e.message;
-          steps.push('telebirr: no record for ' + v);
+          if (/timeout contacting/i.test(e.message)) {
+            // ethiotelecom only answers connections from inside Ethiopia —
+            // stop burning timeouts and let the user's browser open the
+            // official receipt instead
+            telebirrBlocked = true;
+            steps.push('telebirr server unreachable from this hosting region — switching to direct receipt links');
+          } else {
+            steps.push('telebirr: no record for ' + v);
+          }
         }
       }
     };
@@ -317,6 +347,22 @@ module.exports = async (req, res) => {
     if (!fields && fallbackFields) {
       fields = fallbackFields;
       steps.push('NOTE: verify the transaction ID on this record matches your receipt');
+    }
+
+    // the hosting region can't reach ethiotelecom — give the browser the
+    // official receipt links (they open fine on Ethiopian internet)
+    if (!fields && telebirrBlocked && triedTelebirrIds.length) {
+      return send({
+        verdict: 'CHECK_LINK',
+        provider: 'telebirr',
+        confidence: 'This server cannot reach telebirr from its hosting region — tap a link below to open the OFFICIAL ethiotelecom receipt directly (works on Ethiopian internet). If the page shows the payment, it is 100% genuine.',
+        links: triedTelebirrIds.slice(0, 4).map((id) => ({
+          id,
+          url: 'https://transactioninfo.ethiotelecom.et/receipt/' + encodeURIComponent(id),
+        })),
+        fields: {},
+        steps,
+      });
     }
 
     if (fields) {
