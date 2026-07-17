@@ -5,6 +5,7 @@
 const https = require('https');
 const http = require('http');
 const pdfParse = require('pdf-parse');
+const relay = require('../relay');
 
 // Headers the official CBE receipt viewer (mbreciept.cbe.com.et) sends to its own API
 const CBE_APP_HEADERS = {
@@ -142,13 +143,43 @@ async function verifyTelebirr(txId, timeoutMs = 12000) {
   }
 }
 
+// once a direct fetch times out, skip direct attempts for a while — the
+// hosting region can't reach ethiotelecom, so go straight to the relay
+let directBlockedUntil = 0;
+
 async function verifyTelebirrLive(txId, timeoutMs) {
-  // test hook: simulates hosting regions that cannot reach ethiotelecom
-  if (process.env.TELEBIRR_TEST_BLOCK) throw new Error('timeout contacting transactioninfo.ethiotelecom.et');
   const url = 'https://transactioninfo.ethiotelecom.et/receipt/' + encodeURIComponent(txId);
-  const res = await fetchUrl(url, {}, 5, timeoutMs);
-  if (res.status !== 200) throw new Error('telebirr server answered HTTP ' + res.status);
-  const t = htmlToText(res.body.toString('utf8'));
+  let html = null;
+
+  const directAllowed = !process.env.TELEBIRR_TEST_BLOCK && Date.now() > directBlockedUntil;
+  if (directAllowed) {
+    try {
+      const res = await fetchUrl(url, {}, 5, timeoutMs);
+      if (res.status !== 200) throw new Error('telebirr server answered HTTP ' + res.status);
+      html = res.body.toString('utf8');
+    } catch (e) {
+      if (!/timeout contacting/i.test(e.message)) throw e;
+      directBlockedUntil = Date.now() + 10 * 60 * 1000;
+    }
+  }
+
+  if (html === null) {
+    // direct route unreachable — ask the relay agent inside Ethiopia to
+    // fetch the official receipt for us
+    try {
+      html = await relay.fetchViaRelay(url, 15000);
+    } catch (e) {
+      // no agent online / relay failed → same signal as before, so the
+      // caller falls back to the embedded-receipt panels
+      throw new Error('timeout contacting transactioninfo.ethiotelecom.et');
+    }
+  }
+
+  return parseTelebirrHtml(html, txId);
+}
+
+function parseTelebirrHtml(html, txId) {
+  const t = htmlToText(html);
   if (!/telebirr/i.test(t)) throw new Error('telebirr has no record of transaction ' + txId);
 
   const fields = { provider: 'telebirr', txId };
