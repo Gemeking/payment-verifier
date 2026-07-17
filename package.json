@@ -8,11 +8,11 @@
   },
   "dependencies": {
     "express": "^4.19.2",
+    "jimp": "0.22.12",
     "pdf-parse": "^1.1.1",
     "tesseract.js": "^5.1.0"
   },
   "devDependencies": {
-    "jimp": "0.22.12",
     "jsqr": "^1.4.0"
   }
 }

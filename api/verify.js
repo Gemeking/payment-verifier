@@ -292,9 +292,23 @@ module.exports = async (req, res) => {
     // no QR and no typed ID — read the receipt text here on the server
     if (!qr && !manualId && !ocrText && body.image) {
       try {
-        const b64 = String(body.image).replace(/^data:image\/\w+;base64,/, '');
-        ocrText = await ocrImage(Buffer.from(b64, 'base64'));
+        const buf = Buffer.from(String(body.image).replace(/^data:image\/\w+;base64,/, ''), 'base64');
+        ocrText = await ocrImage(buf);
         steps.push('receipt text read on the server (OCR)');
+        // dark-mode screenshots (white text on black, e.g. *889# USSD
+        // confirmations) often read better with inverted colors
+        if (!txCandidatesFromText(ocrText).length) {
+          try {
+            const Jimp = require('jimp');
+            const img = await Jimp.read(buf);
+            img.invert().grayscale().contrast(0.3);
+            const t2 = await ocrImage(await img.getBufferAsync(Jimp.MIME_PNG));
+            if (txCandidatesFromText(t2).length) {
+              ocrText = t2;
+              steps.push('dark screenshot detected — re-read with inverted colors');
+            }
+          } catch (e) {}
+        }
       } catch (e) {
         steps.push('server OCR failed: ' + e.message);
       }
@@ -358,7 +372,11 @@ module.exports = async (req, res) => {
     let pendingCbeId = null;
     const tryCbeId = async (id) => {
       if (accountSuffix.length >= 5) {
-        await attempt('CBE', () => verifyCbeLegacy(id, accountSuffix));
+        // OCR mixes up O and 0 in CBE IDs too — try the likely variants
+        for (const v of o0Variants(id).slice(0, 4)) {
+          if (fields) break;
+          await attempt('CBE', () => verifyCbeLegacy(v, accountSuffix));
+        }
       } else {
         needAccount = true;
         pendingCbeId = id;
