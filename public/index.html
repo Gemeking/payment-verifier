@@ -230,14 +230,23 @@
 
     const links = document.getElementById('links');
     links.innerHTML = '';
-    (d.links || []).forEach((l) => {
+    (d.links || []).forEach((l, i) => {
       const a = document.createElement('a');
       a.className = 'linkbtn';
       a.href = l.url;
       a.target = '_blank';
       a.rel = 'noopener';
-      a.textContent = '🔎 Open official telebirr receipt — ' + l.id;
+      a.textContent = '🔎 Official telebirr record — ' + l.id + ' (tap to open full page)';
       links.appendChild(a);
+      // embed the official receipt right here — the visitor is on Ethiopian
+      // internet, so ethiotelecom's page loads even though our server can't
+      if (i < 2) {
+        const fr = document.createElement('iframe');
+        fr.src = l.url;
+        fr.loading = 'lazy';
+        fr.style.cssText = 'width:100%;height:430px;border:1px solid #e2e8f0;border-radius:10px;margin-top:6px;background:#fff';
+        links.appendChild(fr);
+      }
     });
 
     const hint = document.getElementById('hint');

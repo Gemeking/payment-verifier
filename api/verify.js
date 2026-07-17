@@ -213,6 +213,22 @@ function o0Variants(id) {
   return [...new Set(variants)].sort((a, b) => dist(a) - dist(b));
 }
 
+// Best-effort details read straight off the screenshot — used only when the
+// bank server is unreachable, and always labeled as unconfirmed
+function fieldsFromScreenshot(text) {
+  const t = String(text || '').replace(/\s+/g, ' ');
+  const f = {};
+  let m;
+  if ((m = t.match(/([\d,]+\.\d{2})\s*ETB/))) f.amount = m[1];
+  if ((m = t.match(/(\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2})/))) f.date = m[1];
+  else if ((m = t.match(/([A-Z][a-z]{2}\s+\d{1,2},\s*\d{4}\s+\d{1,2}:\d{2}\s*[AP]M)/))) f.date = m[1];
+  if ((m = t.match(/([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})\s*\+?[\d,]+\.\d{2}\s*ETB/))) {
+    f.payer = m[1].replace(/\b(Transfer|Money|Transaction|Detail|Amount|From)\b/g, ' ').replace(/\s+/g, ' ').trim() || null;
+  }
+  if (/Completed/i.test(t)) f.status = 'Completed';
+  return f;
+}
+
 // Server-side OCR — runs on the always-on server so it works no matter how
 // slow the visitor's connection is (lazy-loaded; first call takes ~15s)
 let ocrWorkerPromise = null;
@@ -382,15 +398,21 @@ module.exports = async (req, res) => {
     // official receipt links for EVERY O/0 variant (they open fine on
     // Ethiopian internet; wrong variants just show an empty page)
     if (!fields && telebirrBlocked && allTelebirrIds.length) {
+      const shot = fieldsFromScreenshot(ocrText);
       return send({
         verdict: 'CHECK_LINK',
         provider: 'telebirr',
-        confidence: 'This server cannot reach telebirr from its hosting region — tap the links below to open the OFFICIAL ethiotelecom receipt (works on Ethiopian internet). The link that shows your payment is the real record; if none show it, the payment is NOT genuine.',
+        confidence: 'Details below were read from your screenshot. The official telebirr record is shown underneath — if it matches, the payment is 100% genuine; if it does not appear, it is NOT.',
         links: allTelebirrIds.slice(0, 4).map((id) => ({
           id,
           url: 'https://transactioninfo.ethiotelecom.et/receipt/' + encodeURIComponent(id),
         })),
-        fields: {},
+        fields: {
+          amount: shot.amount || null,
+          date: shot.date || null,
+          payer: shot.payer || null,
+          status: shot.status ? shot.status + ' (from screenshot — confirm below)' : null,
+        },
         steps,
       });
     }
