@@ -20,7 +20,7 @@
   .primary { background: #2563eb; color: #fff; }
   .primary:disabled { background: #94a3b8; cursor: default; }
   .ghost { background: #eef2f7; color: #1c2733; }
-  input[type=text] { width: 100%; margin-top: 12px; padding: 11px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: .95rem; }
+  input[type=text], textarea { width: 100%; margin-top: 12px; padding: 11px; border: 1px solid #cbd5e1; border-radius: 10px; font-size: .95rem; font-family: inherit; resize: vertical; }
   .note { font-size: .78rem; color: #94a3b8; margin-top: 6px; }
   #preview { max-width: 100%; max-height: 260px; border-radius: 10px; margin-top: 12px; display: none; }
   .progress { display: none; text-align: center; color: #2563eb; font-size: .9rem; margin-top: 12px; }
@@ -59,9 +59,10 @@
       <button class="ghost" id="btnCam">📸 Camera</button>
       <button class="ghost" id="btnFile">🖼️ Upload</button>
     </div>
-    <input type="text" id="txid" placeholder="Optional: type the transaction ID (FT… or telebirr no.)" maxlength="20">
-    <input type="text" id="account" placeholder="CBE account — last 8 digits (enter once, remembered)" maxlength="16">
-    <div class="note">CBE requires these digits to release its records — enter them once and this device remembers them for every future check.</div>
+    <textarea id="paste" rows="3" placeholder="Best for SMS: tap ‘Copy text’ on the CBE/telebirr message, then paste it here"></textarea>
+    <input type="text" id="txid" placeholder="…or type the transaction ID / paste the receipt link" maxlength="120">
+    <input type="text" id="account" placeholder="CBE account — last 8 digits (only for old receipts)" maxlength="16">
+    <div class="note">A CBE <b>SMS</b> contains a verification link — paste its text above and it verifies with no account digits. The account box is only needed for old CBE receipts that have no link.</div>
     <img id="preview" alt="receipt preview">
     <div class="btns">
       <button class="primary" id="btnVerify" disabled>Verify payment</button>
@@ -173,13 +174,14 @@
 
   btnVerify.onclick = async () => {
     const manualId = document.getElementById('txid').value.trim();
-    if (!currentFile && !manualId) return;
+    const pasted = document.getElementById('paste').value.trim();
+    if (!currentFile && !manualId && !pasted) return;
     btnVerify.disabled = true;
     progress.style.display = 'block';
     document.getElementById('result').style.display = 'none';
     try {
       let qr = null, imageData = null;
-      if (currentFile) {
+      if (currentFile && !pasted) {
         progressText.textContent = 'Reading QR code…';
         const img = await loadBitmap(currentFile);
         try { qr = decodeQrFromImage(img); } catch (e) {}
@@ -192,6 +194,8 @@
         } else {
           progressText.textContent = 'Checking with the official bank servers…';
         }
+      } else {
+        progressText.textContent = 'Checking with the official bank servers…';
       }
 
       const account = accountEl.value.trim();
@@ -201,7 +205,7 @@
       const res = await fetch('/api/verify', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ qr, image: imageData, txId: manualId, account }),
+        body: JSON.stringify({ qr, image: imageData, txId: manualId, text: pasted, account }),
       });
       const data = await res.json();
       if (data.verdict === 'NEED_ACCOUNT') {
@@ -219,9 +223,13 @@
       btnVerify.disabled = false;
     }
   };
-  document.getElementById('txid').addEventListener('input', (e) => {
-    if (e.target.value.trim() || currentFile) btnVerify.disabled = false;
-  });
+  const enableIfAny = () => {
+    btnVerify.disabled = !(currentFile
+      || document.getElementById('txid').value.trim()
+      || document.getElementById('paste').value.trim());
+  };
+  document.getElementById('txid').addEventListener('input', enableIfAny);
+  document.getElementById('paste').addEventListener('input', enableIfAny);
 
   function showResult(d) {
     const r = document.getElementById('result');

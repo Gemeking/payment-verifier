@@ -254,6 +254,25 @@ function o0Variants(id) {
   return [...new Set(variants)].sort((a, b) => (rank(a) - rank(b)) || (dist(a) - dist(b)));
 }
 
+// CBE SMS / receipt carries a full mbreciept.cbe.com.et link whose token
+// unlocks the record with NO account digits — the best possible CBE route
+function cbeTokenFromText(t) {
+  const m = String(t).match(/mbreciept\.cbe\.com\.et\/?\s*(v2-[A-Za-z0-9_-]{6,})/i);
+  return m ? m[1] : null;
+}
+// legacy apps.cbe.com.et link carries the FT id (and sometimes the account)
+function cbeLegacyFromText(t) {
+  const m = String(t).match(/apps\.cbe\.com\.et[^\s]*[?&]id=([A-Za-z0-9]+)/i);
+  return m ? m[1].toUpperCase() : null;
+}
+// telebirr SMS: "...transaction number is DGH9WXP83D" or a receipt link
+function telebirrIdFromText(t) {
+  let m = String(t).match(/ethiotelecom\.et\/receipt\/([A-Za-z0-9]{6,})/i);
+  if (m) return m[1].toUpperCase();
+  m = String(t).match(/transaction number is\s+([A-Z0-9]{8,12})/i);
+  return m ? m[1].toUpperCase() : null;
+}
+
 // Server-side OCR — runs on the always-on server so it works no matter how
 // slow the visitor's connection is (lazy-loaded; first call takes ~15s)
 let ocrWorkerPromise = null;
@@ -285,12 +304,20 @@ module.exports = async (req, res) => {
     if (typeof body === 'string') body = JSON.parse(body || '{}');
     if (!body) body = {};
     const qr = (body.qr || '').trim() || null;
-    const manualId = (body.txId || '').trim().toUpperCase() || null;
+    const rawManual = (body.txId || '').trim();
+    const manualId = rawManual.toUpperCase() || null;
+    // pasted text (user tapped "Copy text" on the SMS) — the most reliable
+    // source of all, since it carries the exact link/number
+    const pastedText = (body.text || '').trim();
     let ocrText = body.ocrText || '';
+    if (pastedText) {
+      ocrText = (ocrText ? ocrText + '\n' : '') + pastedText;
+      steps.push('reading the pasted receipt text');
+    }
     const accountSuffix = (body.account || '').replace(/\D/g, '');
 
-    // no QR and no typed ID — read the receipt text here on the server
-    if (!qr && !manualId && !ocrText && body.image) {
+    // no QR, no typed ID, no pasted text — read the receipt text here on the server
+    if (!qr && !manualId && !pastedText && !ocrText && body.image) {
       try {
         const buf = Buffer.from(String(body.image).replace(/^data:image\/\w+;base64,/, ''), 'base64');
         ocrText = await ocrImage(buf);
@@ -410,11 +437,33 @@ module.exports = async (req, res) => {
       steps.push('no QR code readable — falling back to transaction ID search');
     }
 
-    // 2. Manually typed transaction ID
+    // 1b. Full official link found in QR / pasted text / OCR. The CBE
+      //     mbreciept link verifies with NO account digits — best route.
+    if (!fields) {
+      const token = cbeTokenFromText(ocrText) || cbeTokenFromText(qr || '') || cbeTokenFromText(rawManual);
+      if (token) {
+        steps.push('CBE receipt link found — verifying directly (no account needed)');
+        await attempt('CBE', () => verifyCbeApi(token));
+      }
+    }
+    if (!fields) {
+      const legacyId = cbeLegacyFromText(ocrText) || cbeLegacyFromText(rawManual);
+      if (legacyId) await tryCbeId(legacyId);
+    }
+    if (!fields) {
+      const tbId = telebirrIdFromText(ocrText) || telebirrIdFromText(rawManual);
+      if (tbId) {
+        steps.push('telebirr transaction number found in text: ' + tbId);
+        await tryTelebirr(tbId, true);
+      }
+    }
+
+    // 2. Manually typed transaction ID (or a pasted link handled above)
     if (!fields && manualId) {
-      if (/^FT[A-Z0-9]{6,}$/.test(manualId)) await tryCbeId(manualId);
+      if (/cbe\.com\.et/i.test(rawManual)) { /* link already tried above */ }
+      else if (/^FT[A-Z0-9]{6,}$/.test(manualId)) await tryCbeId(manualId);
       else if (/^[A-Z0-9]{10}$/.test(manualId)) await tryTelebirr(manualId);
-      else { failReason = manualId + ' does not look like a CBE (FT…) or telebirr (10 characters) transaction ID'; }
+      else if (!failReason) { failReason = manualId + ' does not look like a CBE (FT…) or telebirr (10-character) transaction ID'; }
     }
 
     // 3. Transaction IDs found in the receipt text (OCR) — each candidate is
