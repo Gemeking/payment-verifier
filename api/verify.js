@@ -210,23 +210,17 @@ function o0Variants(id) {
     variants.push(arr.join(''));
   }
   const dist = (a) => { let d = 0; for (let i = 0; i < a.length; i++) if (a[i] !== id[i]) d++; return d; };
-  return [...new Set(variants)].sort((a, b) => dist(a) - dist(b));
-}
-
-// Best-effort details read straight off the screenshot — used only when the
-// bank server is unreachable, and always labeled as unconfirmed
-function fieldsFromScreenshot(text) {
-  const t = String(text || '').replace(/\s+/g, ' ');
-  const f = {};
-  let m;
-  if ((m = t.match(/([\d,]+\.\d{2})\s*ETB/))) f.amount = m[1];
-  if ((m = t.match(/(\d{4}\/\d{2}\/\d{2}\s+\d{2}:\d{2}:\d{2})/))) f.date = m[1];
-  else if ((m = t.match(/([A-Z][a-z]{2}\s+\d{1,2},\s*\d{4}\s+\d{1,2}:\d{2}\s*[AP]M)/))) f.date = m[1];
-  if ((m = t.match(/([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,3})\s*\+?[\d,]+\.\d{2}\s*ETB/))) {
-    f.payer = m[1].replace(/\b(Transfer|Money|Transaction|Detail|Amount|From)\b/g, ' ').replace(/\s+/g, ' ').trim() || null;
-  }
-  if (/Completed/i.test(t)) f.status = 'Completed';
-  return f;
+  // OCR reads the letter O as the digit 0 (never the other way), so variants
+  // that only correct 0→O are most likely, then the ID exactly as read
+  const rank = (a) => {
+    if (a === id) return 1;
+    let pureFix = true;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== id[i] && !(id[i] === '0' && a[i] === 'O')) { pureFix = false; break; }
+    }
+    return pureFix ? 0 : 2;
+  };
+  return [...new Set(variants)].sort((a, b) => (rank(a) - rank(b)) || (dist(a) - dist(b)));
 }
 
 // Server-side OCR — runs on the always-on server so it works no matter how
@@ -398,21 +392,15 @@ module.exports = async (req, res) => {
     // official receipt links for EVERY O/0 variant (they open fine on
     // Ethiopian internet; wrong variants just show an empty page)
     if (!fields && telebirrBlocked && allTelebirrIds.length) {
-      const shot = fieldsFromScreenshot(ocrText);
       return send({
         verdict: 'CHECK_LINK',
         provider: 'telebirr',
-        confidence: 'Details below were read from your screenshot. The official telebirr record is shown underneath — if it matches, the payment is 100% genuine; if it does not appear, it is NOT.',
+        confidence: 'The OFFICIAL telebirr record is shown below, loaded by your phone directly from ethiotelecom — nothing is read from the image. If the panel shows the payment, it is 100% genuine; if it shows an error, tap the next number.',
         links: allTelebirrIds.slice(0, 4).map((id) => ({
           id,
           url: 'https://transactioninfo.ethiotelecom.et/receipt/' + encodeURIComponent(id),
         })),
-        fields: {
-          amount: shot.amount || null,
-          date: shot.date || null,
-          payer: shot.payer || null,
-          status: shot.status ? shot.status + ' (from screenshot — confirm below)' : null,
-        },
+        fields: {},
         steps,
       });
     }

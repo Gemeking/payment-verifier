@@ -230,24 +230,41 @@
 
     const links = document.getElementById('links');
     links.innerHTML = '';
-    (d.links || []).forEach((l, i) => {
-      const a = document.createElement('a');
-      a.className = 'linkbtn';
-      a.href = l.url;
-      a.target = '_blank';
-      a.rel = 'noopener';
-      a.textContent = '🔎 Official telebirr record — ' + l.id + ' (tap to open full page)';
-      links.appendChild(a);
-      // embed the official receipt right here — the visitor is on Ethiopian
-      // internet, so ethiotelecom's page loads even though our server can't
-      if (i < 2) {
-        const fr = document.createElement('iframe');
-        fr.src = l.url;
-        fr.loading = 'lazy';
-        fr.style.cssText = 'width:100%;height:430px;border:1px solid #e2e8f0;border-radius:10px;margin-top:6px;background:#fff';
-        links.appendChild(fr);
-      }
-    });
+    if (d.links && d.links.length) {
+      // one embedded official-record panel with number tabs — the visitor is
+      // on Ethiopian internet, so ethiotelecom's page loads even though our
+      // server can't reach it
+      const row = document.createElement('div');
+      row.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;margin-top:10px';
+      const fr = document.createElement('iframe');
+      fr.style.cssText = 'width:100%;height:460px;border:1px solid #e2e8f0;border-radius:10px;margin-top:8px;background:#fff';
+      const open = document.createElement('a');
+      open.target = '_blank';
+      open.rel = 'noopener';
+      open.style.cssText = 'display:block;text-align:center;margin-top:6px;font-size:.85rem;color:#2563eb';
+      const tabs = [];
+      const select = (i) => {
+        fr.src = d.links[i].url;
+        open.href = d.links[i].url;
+        open.textContent = 'Open full page — ' + d.links[i].id;
+        tabs.forEach((t, j) => {
+          t.style.background = i === j ? '#2563eb' : '#eef2f7';
+          t.style.color = i === j ? '#fff' : '#1c2733';
+        });
+      };
+      d.links.forEach((l, i) => {
+        const b = document.createElement('button');
+        b.textContent = (i + 1) + '. ' + l.id;
+        b.style.cssText = 'flex:0 0 auto;padding:8px 12px;font-size:.82rem;border-radius:8px;border:0';
+        b.onclick = () => select(i);
+        tabs.push(b);
+        row.appendChild(b);
+      });
+      links.appendChild(row);
+      links.appendChild(fr);
+      links.appendChild(open);
+      select(0);
+    }
 
     const hint = document.getElementById('hint');
     hint.style.display = d.hint ? 'block' : 'none';
